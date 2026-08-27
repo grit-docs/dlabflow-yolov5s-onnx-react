@@ -8,6 +8,7 @@ import { useState, useRef, useEffect, useCallback, memo } from 'react'
 import Webcam from 'react-webcam'
 import * as ort from 'onnxruntime-web'
 import 'onnxruntime-web/webgl'; // 🚀 WebGL 백엔드를 명시적으로 활성화
+import 'onnxruntime-web/webgpu'; // 🚀 WebGPU 백엔드 명시적 추가
 import './App.css'
 
 // 🚀 onnxruntime-web WASM 파일이 있는 폴더 경로를 지정 (라이브러리가 자동으로 필요한 파일을 찾도록 함)
@@ -247,6 +248,13 @@ function App() {
   const [manualFlip, setManualFlip] = useState(null); // 수동 반전 설정 (null = 자동)
   const [isSwitchingCamera, setIsSwitchingCamera] = useState(false); // 카메라 전환 중 상태
   const [webcamKey, setWebcamKey] = useState(Date.now()); // 📸 Webcam 강제 리마운트를 위한 key
+
+  // 🎯 현재 활성화된 가속 엔진 백엔드 표시용 State 추가
+  const [activeBackend, setActiveBackend] = useState('확인 중...');
+  // auto: WebGPU → WebGL → CPU(WASM) 순서로 자동 선택
+  const [selectedBackend, setSelectedBackend] = useState('wasm');
+  const inputTensorBufferRef = useRef(new Float32Array(640 * 640 * 3));
+
   
   // shouldFlipCamera의 최신 값을 항상 참조하기 위한 ref
   const shouldFlipCameraRef = useRef(false);
@@ -316,6 +324,11 @@ function App() {
 
   // 모델 로드 - deviceType이 설정된 후에 실행
   useEffect(() => {
+    modelLoadingStartedRef.current = false;
+  }, [selectedBackend]);
+
+  // 모델 로드 - deviceType이 설정된 후에 실행
+  useEffect(() => {
     if (!deviceType || modelLoadingStartedRef.current) {
       console.log("⏳ deviceType 설정 대기 중이거나 이미 모델 로딩 시작됨...");
       return; // deviceType이 설정될 때까지 또는 이미 로딩이 시작되었으면 대기
@@ -353,7 +366,7 @@ function App() {
         
         // 2. ONNX 모델 및 세션 생성
         // 📱 디바이스 종류에 따라 최적의 실행 백엔드 목록을 선택
-        const providers = deviceType === 'desktop'
+        /*const providers = deviceType === 'desktop'
           ? ['webgpu', 'webgl', 'cpu']
           : ['webgl', 'cpu'];
 
@@ -371,6 +384,40 @@ function App() {
         console.log(`✅ ${deviceType} 디바이스에서 모델 로딩 완료`);
         
         // 첫 번째 실제 추론에서 자동으로 모델 구조를 감지합니다
+        modelInfoRef.current.isStructureDetected = false;  */
+
+        // 🎯 사용자가 선택한 백엔드에 따라 실행 Provider 결정
+        const providerLabels = {
+          webgpu: 'WEBGPU',
+          webgl: 'WEBGL',
+          wasm: 'CPU (WASM)',
+        };
+
+        const selectedProvider = selectedBackend;
+        let session = null;
+        let currentEP = 'UNKNOWN';
+
+        try {
+          console.log(`🚀 [ONNX] ${selectedProvider} 백엔드로 세션 생성 시도 중...`);
+
+          session = await ort.InferenceSession.create(modelPath, {
+            executionProviders: [selectedProvider],
+            graphOptimizationLevel: 'all',
+            enableCpuMemArena: false,
+            enableMemPattern: false,
+          });
+
+          currentEP = providerLabels[selectedProvider] || selectedProvider.toUpperCase();
+          console.log(`✅ [ONNX] ${currentEP} 백엔드 연결 성공!`);
+        } catch (err) {
+          console.error(`❌ [ONNX] ${selectedProvider} 백엔드 로드 실패:`, err);
+          throw err;
+        }
+
+        sessionRef.current = session;
+        setActiveBackend(currentEP);
+
+        // 첫 번째 실제 추론에서 자동으로 모델 구조를 감지합니다
         modelInfoRef.current.isStructureDetected = false;
         
         setIsModelLoaded(true);
@@ -386,7 +433,8 @@ function App() {
       if (animationRef.current) cancelAnimationFrame(animationRef.current);
       if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
     };
-  }, [deviceType]); // deviceType이 설정되면 모델 로딩
+  // }, [deviceType]); // deviceType이 설정되면 모델 로딩
+  }, [deviceType, selectedBackend]);
 
 
 
@@ -1122,7 +1170,9 @@ function App() {
 
     // 📱 모바일 최적화된 픽셀 데이터 변환 (더 효율적인 방법)
     const totalPixels = modelWidth * modelHeight;
-    const inputTensor = new Float32Array(totalPixels * 3);
+    //const inputTensor = new Float32Array(totalPixels * 3);
+    // 🚀 [수정] 매 프레임 새 배열 생성(GC 유발) 대신 미리 만든 버퍼 재사용
+    const inputTensor = inputTensorBufferRef.current;
     
     // 한번에 RGB 채널별로 처리 (캐시 친화적)
     for (let i = 0; i < totalPixels; i++) {
@@ -1295,7 +1345,7 @@ function App() {
               flexDirection: 'column',
               alignItems: 'stretch',
               gap: '0.5rem',
-              width: deviceType === 'mobile' ? '180px' : '150px', // 모바일에서 너비 축소
+              width: deviceType === 'mobile' ? '200px' : '150px', // 모바일에서 너비 축소
               flexShrink: 0
             }}>
               <ConfidenceSlider
@@ -1305,6 +1355,51 @@ function App() {
               />
               
               {/* 🎯 카메라 상태 표시 - 항상 영역 유지 */}
+              <div style={{
+                display: 'flex',
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '0.5rem',
+                width: '100%',
+                fontSize: '0.75rem',
+                color: 'var(--text-secondary)'
+              }}>
+                <label
+                    htmlFor="backend-select"
+                    style={{
+                      whiteSpace: 'nowrap',
+                      flexShrink: 0
+                    }}
+                >
+                  가속 엔진
+                </label>
+                <select
+                    id="backend-select"
+                    value={selectedBackend}
+                    disabled={isModelLoading || isDetecting}
+                    onChange={(e) => {
+                      setIsModelLoaded(false);
+                      setActiveBackend('확인 중...');
+                      setSelectedBackend(e.target.value);
+                    }}
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      padding: '0.25rem',
+                      borderRadius: '0.25rem',
+                      border: '1px solid rgba(148, 163, 184, 0.4)',
+                      backgroundColor: 'var(--background-color)',
+                      color: 'var(--text-primary)',
+                      fontSize: '0.75rem'
+                    }}
+                >
+                  <option value="wasm">CPU</option>
+                  <option value="webgl">WebGL</option>
+                  <option value="webgpu">WebGPU</option>
+                </select>
+              </div>
+
               <div className="camera-status-info" style={{ 
                 fontSize: '0.75rem', 
                 color: 'var(--text-secondary)',
@@ -1607,13 +1702,57 @@ function App() {
                   </h3>
                   
                                      {/* 📊 성능 정보 표시 */}
-                   <div style={{ 
+                   {/*<div style={{
                      fontSize: '0.85rem', 
                      color: 'var(--text-secondary)', 
                      marginBottom: '0.5rem'
                    }}>
                      추론 속도: <span style={{ color: 'var(--primary-color)', fontWeight: '500' }}>{currentFPS} FPS</span>
-                   </div>
+                   </div>*/}
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    fontSize: '0.85rem',
+                    color: 'var(--text-secondary)',
+                    marginBottom: '0.5rem'
+                  }}>
+                    <div>
+                      가속 엔진:
+                      <span style={{
+                        marginLeft: '6px',
+                        padding: '2px 8px',
+                        borderRadius: '4px',
+                        fontSize: '0.75rem',
+                        fontWeight: 'bold',
+                        backgroundColor:
+                            activeBackend === 'WEBGPU'
+                                ? 'rgba(16, 185, 129, 0.2)'
+                                : activeBackend === 'WEBGL'
+                                    ? 'rgba(59, 130, 246, 0.2)'
+                                    : 'rgba(148, 163, 184, 0.2)',
+                        color:
+                            activeBackend === 'WEBGPU'
+                                ? '#10B981'
+                                : activeBackend === 'WEBGL'
+                                    ? '#3B82F6'
+                                    : '#94A3B8',
+                        border: `1px solid ${
+                            activeBackend === 'WEBGPU'
+                                ? '#10B981'
+                                : activeBackend === 'WEBGL'
+                                    ? '#3B82F6'
+                                    : '#94A3B8'
+                        }`
+                      }}>
+                          {activeBackend}
+                        </span>
+                    </div>
+                    <div>
+                      추론 속도: <span style={{ color: 'var(--primary-color)', fontWeight: 'bold' }}>{currentFPS} FPS</span>
+                    </div>
+                  </div>
+
                   {detections.length > 0 ? (
                       <div className="detection-badges">
                         {detections.map((detection, index) => (
